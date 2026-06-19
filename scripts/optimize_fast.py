@@ -10,23 +10,26 @@ import csv
 from datetime import datetime
 from collections import defaultdict
 
-PAIRS_DIR = os.path.expanduser("~/falconfx-bot/data")
+#PAIRS_DIR = os.path.expanduser("~/falconfx-bot/data")
+PAIRS_DIR = os.path.expanduser("~/falconfx-bot/data/unified")
 
 def load_csv(filepath):
-    """Load OHLCV CSV — fast path"""
+    """Load OHLCV CSV — fast path, handles multiple formats"""
     bars = []
-    with open(filepath, 'r') as f:
+    with open(filepath, 'r', encoding='utf-8-sig') as f:
         reader = csv.DictReader(f)
+        # Normalize column names to lowercase
         for row in reader:
+            # Normalize keys
+            r = {k.strip().lower(): v.strip() for k, v in row.items() if k}
             try:
-                ts_str = row.get('Index', row.get('Datetime', row.get('Date', '')))
+                ts_str = r.get('timestamp', r.get('index', r.get('datetime', r.get('date', ''))))
                 if not ts_str:
                     continue
-                # Fast parse: just use string as timestamp key
-                o = float(row['Open'])
-                h = float(row['High'])
-                l = float(row['Low'])
-                c = float(row['Close'])
+                o = float(r['open'])
+                h = float(r['high'])
+                l = float(r['low'])
+                c = float(r['close'])
                 if o <= 0 or h <= 0 or l <= 0 or c <= 0:
                     continue
                 bars.append({
@@ -62,29 +65,61 @@ def calc_atr_fast(bars, period=14):
 
 
 def find_swings_fast(bars, lookback):
-    """Find swing points — optimized"""
+    """Find swing points — O(n) with early exit"""
+    n = len(bars)
     swing_highs = []
     swing_lows = []
-    n = len(bars)
     
-    for i in range(lookback, n - lookback):
-        h = bars[i]['high']
-        l = bars[i]['low']
-        is_high = True
-        is_low = True
+    # Extract arrays once
+    highs = [b['high'] for b in bars]
+    lows = [b['low'] for b in bars]
+    
+    # Rolling max approach: find local maxima/minima
+    i = lookback
+    while i < n - lookback:
+        h = highs[i]
+        # Quick reject: not higher than immediate neighbor
+        if h <= highs[i-1] or h <= highs[i+1]:
+            i += 1
+            continue
         
-        for j in range(1, lookback + 1):
-            if h <= bars[i-j]['high'] or h <= bars[i+j]['high']:
-                is_high = False
-            if l >= bars[i-j]['low'] or l >= bars[i+j]['low']:
-                is_low = False
-            if not is_high and not is_low:
+        # Check if highest in [i-lookback, i+lookback]
+        is_swing = True
+        j = i - lookback
+        while j <= i + lookback:
+            if j != i and highs[j] >= h:
+                is_swing = False
+                j = i + 1  # Skip ahead
                 break
+            j += 1
         
-        if is_high:
+        if is_swing:
             swing_highs.append((i, h))
-        if is_low:
+            i += lookback  # Skip ahead past this swing
+        else:
+            i = j
+    
+    i = lookback
+    while i < n - lookback:
+        l = lows[i]
+        if l >= lows[i-1] or l >= lows[i+1]:
+            i += 1
+            continue
+        
+        is_swing = True
+        j = i - lookback
+        while j <= i + lookback:
+            if j != i and lows[j] <= l:
+                is_swing = False
+                j = i + 1
+                break
+            j += 1
+        
+        if is_swing:
             swing_lows.append((i, l))
+            i += lookback
+        else:
+            i = j
     
     return swing_highs, swing_lows
 
@@ -271,6 +306,12 @@ def optimize_pair(pair_name, csv_file):
     bars = load_csv(csv_file)
     if len(bars) < 100:
         return None
+    
+    # If more than 10K bars, sample every 4th bar for speed
+    if len(bars) > 10000:
+        step = max(1, len(bars) // 10000)
+        bars = bars[::step]
+        print(f"  Sampled to {len(bars)} bars (1/{step})")
     
     best = None
     best_score = 0
