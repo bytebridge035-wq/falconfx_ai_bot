@@ -109,7 +109,7 @@ class FalconFXBacktester:
         return float(tr[-period:].mean()) if len(tr) >= period else 0.0
     
     def detect_swing_points(self, df: pd.DataFrame, bar_idx: int) -> tuple:
-        """Detect swing highs and lows."""
+        """Detect swing highs and lows (optimized)."""
         lb = self.swing_lookback
         if bar_idx < lb or bar_idx >= len(df) - lb:
             return False, False
@@ -117,16 +117,12 @@ class FalconFXBacktester:
         high = df['high'].iloc[bar_idx]
         low = df['low'].iloc[bar_idx]
         
-        is_high = True
-        is_low = True
+        # Vectorized check
+        slice_high = df['high'].iloc[bar_idx-lb:bar_idx+lb+1]
+        slice_low = df['low'].iloc[bar_idx-lb:bar_idx+lb+1]
         
-        for i in range(bar_idx - lb, bar_idx + lb + 1):
-            if i == bar_idx:
-                continue
-            if df['high'].iloc[i] >= high:
-                is_high = False
-            if df['low'].iloc[i] <= low:
-                is_low = False
+        is_high = high == slice_high.max()
+        is_low = low == slice_low.min()
         
         return is_high, is_low
     
@@ -380,7 +376,7 @@ class FalconFXBacktester:
                 move = trade.entry_price - close
             
             be_trigger = trade.entry_price * (self.be_trigger_pct / 100)
-            if move >= be_trigger or move >= risk:
+            if move >= risk * 1.5:  # Move to BE only after 1.5R profit
                 # Move SL to entry + buffer
                 buffer = risk * 0.05
                 if trade.direction == 'long':
@@ -432,11 +428,12 @@ class FalconFXBacktester:
                         atr = self.calculate_atr(df.iloc[:i+1])
                         
                         if signal == 'long':
-                            sl = self.support_level - atr * 0.3 if self.support_level > 0 else close - atr * 1.5
+                            # SL below structure with wider ATR buffer (1.5x ATR)
+                            sl = self.support_level - atr * 1.5 if self.support_level > 0 else close - atr * 2.0
                             risk = close - sl
                             tp = close + risk * self.tp_ratio
                         else:
-                            sl = self.resistance_level + atr * 0.3 if self.resistance_level > 0 else close + atr * 1.5
+                            sl = self.resistance_level + atr * 1.5 if self.resistance_level > 0 else close + atr * 2.0
                             risk = sl - close
                             tp = close - risk * self.tp_ratio
                         
