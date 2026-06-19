@@ -28,15 +28,24 @@ pip install yfinance pandas
 
 ## Step 3: Download Historical Data
 
+### Option A: Kaggle (Recommended — free, no API key needed)
 ```bash
-# Download 5 years of EUR/USD 1H data
+# Downloads from anthonygocmen/multi-timeframe-fx-dataset-29-major-pairs
+# Covers: EURUSD, GBPUSD, EURJPY, USDJPY, AUDUSD, and 24 more pairs
+# Timeframes: 5M, 15M, 1H
+
+python scripts/kaggle_data.py --symbol EURJPY --timeframe 1H
+python scripts/kaggle_data.py --symbol EURUSD --timeframe 1H
+python scripts/kaggle_data.py --symbol GBPUSD --timeframe 1H
+python scripts/kaggle_data.py --symbol USDJPY --timeframe 1H
+```
+
+### Option B: Yahoo Finance (more years available)
+```bash
+python scripts/download_data.py --symbol EURJPY --years 5 --timeframe 1H
 python scripts/download_data.py --symbol EURUSD --years 5 --timeframe 1H
-
-# Download 3 years of EUR/JPY 1H data (Mark's best backtested pair)
-python scripts/download_data.py --symbol EURJPY --years 3 --timeframe 1H
-
-# Download 4H data for structure analysis
-python scripts/download_data.py --symbol EURUSD --years 5 --timeframe 4H
+python scripts/download_data.py --symbol GBPUSD --years 5 --timeframe 1H
+python scripts/download_data.py --symbol XAUUSD --years 5 --timeframe 1H
 ```
 
 ## Step 4: Compile the EA
