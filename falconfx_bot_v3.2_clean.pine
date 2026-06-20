@@ -1,0 +1,345 @@
+//@version=5
+strategy("FalconFX Bot v3.2 [Clean]", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=1, initial_capital=10000, commission_type=strategy.commission.percent, commission_value=0.02, slippage=2, pyramiding=0, calc_on_every_tick=false, process_orders_on_close=true, max_bars_back=5000)
+
+// ==================== INPUTS ====================
+
+// --- Structure ---
+swingLen = input.int(10, "Swing Lookback", minval=3, maxval=30, tooltip="Bars to identify swing highs/lows")
+structureLookback = input.int(50, "Structure HTF Lookback", minval=20, maxval=200, tooltip="How far back to look for the breathing cycle")
+impulseMinBars = input.int(3, "Min Impulse Bars", minval=2, maxval=10, tooltip="Minimum consecutive directional bars to classify as impulse")
+
+// --- Entry Types ---
+useRiskEntry = input.bool(true, "Enable Risk Entry", tooltip="Enter within the pattern before break")
+useReducedRiskEntry = input.bool(true, "Enable Reduced Risk Entry", tooltip="Enter on break/close outside pattern")
+
+// --- Trade Management ---
+riskPercent = input.float(1.0, "Risk Per Trade %", minval=0.5, maxval=2.0, step=0.1, tooltip="Falcon mandates 1% hard cap")
+slBufferATR = input.float(1.5, "Stop Loss Buffer (x ATR)", minval=0.5, maxval=3.0, step=0.1, tooltip="SL distance beyond swing point")
+entryMaxDistATR = input.float(0.5, "Entry Max Distance (x ATR)", minval=0.1, maxval=2.0, step=0.1, tooltip="Max distance from swing point to enter")
+maxTradesDay = input.int(2, "Max Trades Per Day", minval=1, maxval=3, tooltip="Discipline: prevents overtrading")
+useHalfRiskMethod = input.bool(true, "Enable Half-Risk Method", tooltip="Move SL to -0.5% when price doesn't impulse away")
+halfRiskThreshold = input.float(1.0, "Half-Risk trigger (hours)", minval=1, maxval=10, tooltip="If price hasn't impulse moved in this many hours, move to half-risk")
+breakevenTrigger = input.string("1% move or recentHL", "Break-Even Trigger", options=["1% move or recentHL", "90% rule level", "Manual ATR-based"], tooltip="When to move SL to entry+spread")
+
+// --- Scaling In ---
+enableScalingIn = input.bool(false, "Enable Scaling In", tooltip="Only for advanced traders. Adds on continuation corrections.")
+maxScaleIns = input.int(2, "Max Scale-Ins per Trade", minval=1, maxval=3)
+riskPerScaleIn = input.float(1.0, "Scale-In Risk %", minval=0.5, maxval=1.5, step=0.1)
+
+// --- Profit Management ---
+useNinetyPercentRule = input.bool(true, "Enable 90% Rule", tooltip="90% of impulsive moves reach the start of the correction")
+tpRatio = input.float(3.0, "Take Profit R:R", minval=2.0, maxval=5.0, step=0.5, tooltip="Falcon backtests show avg 3:1 RR")
+
+// --- Pattern Detection ---
+useEngulfing = input.bool(true, "Engulfing at Structure")
+usePinBar = input.bool(true, "Pin Bars at Structure")
+useInsideBar = input.bool(true, "Inside Bar (Multi-Touch)")
+useFlagPattern = input.bool(true, "Flag Continuation", tooltip="Tight corrective flag - primary Falcon scale-in trigger")
+use90Percent = input.bool(true, "90% Rule Reversal Watch")
+
+// --- Session Filter ---
+useSessionFilter = input.bool(true, "Filter by Session")
+londonStart = input.int(7, "London Open (UTC)", minval=0, maxval=23)
+londonEnd = input.int(16, "London Close (UTC)", minval=0, maxval=23)
+nyStart = input.int(12, "NY Open (UTC)", minval=0, maxval=23)
+nyEnd = input.int(21, "NY Close (UTC)", minval=0, maxval=23)
+
+// --- Visuals ---
+showStructure = input.bool(true, "Show Structure Lines")
+showPhases = input.bool(true, "Show Impulse/Corrective")
+showEntries = input.bool(true, "Show Entry Types")
+show90Percent = input.bool(true, "Show 90% Rule Level")
+
+// ==================== SESSION FILTER ====================
+
+currentHour = hour
+inLondonSession = currentHour >= londonStart and currentHour < londonEnd
+inNYSession = currentHour >= nyStart and currentHour < nyEnd
+inSession = not useSessionFilter or inLondonSession or inNYSession
+
+// ==================== DAILY TRADE COUNTER ====================
+
+var int tradesToday = 0
+var int lastTradeDay = 0
+isNewDay = ta.change(dayofmonth) != 0
+
+if isNewDay
+    tradesToday := 0
+    lastTradeDay := dayofmonth
+
+canTrade = tradesToday < maxTradesDay
+
+// ==================== NATURE THEORY: IMPULSIVE vs CORRECTIVE ====================
+
+bodySize = math.abs(close - open)
+range_ = high - low
+avgBody = ta.sma(bodySize, 20)
+avgRange = ta.sma(range_, 20)
+
+upBar = close > open
+downBar = close < open
+
+var int consecutiveUp = 0
+var int consecutiveDown = 0
+
+if upBar
+    consecutiveUp += 1
+    consecutiveDown := 0
+else if downBar
+    consecutiveDown += 1
+    consecutiveUp := 0
+else
+    consecutiveUp := 0
+    consecutiveDown := 0
+
+isImpulseUp = consecutiveUp >= impulseMinBars and bodySize > avgBody * 1.3
+isImpulseDown = consecutiveDown >= impulseMinBars and bodySize > avgBody * 1.3
+isCorrective = bodySize < avgBody * 0.6 and range_ < avgRange * 0.7 and math.abs(close - open) < math.abs(high - low) * 0.4
+
+var bool inImpulsivePhase = false
+var bool inCorrectivePhase = false
+var int impulseStartBar = na
+
+if isImpulseUp or isImpulseDown
+    inImpulsivePhase := true
+    inCorrectivePhase := false
+    impulseStartBar := bar_index
+
+if inImpulsivePhase and isCorrective
+    inImpulsivePhase := false
+    inCorrectivePhase := true
+
+phaseChangeImpulseToCorrective = inCorrectivePhase and not inCorrectivePhase[1]
+phaseChangeCorrectiveToImpulse = inImpulsivePhase and not inImpulsivePhase[1]
+
+// ==================== MARKET STRUCTURE ====================
+
+swingHigh = ta.pivothigh(high, swingLen, swingLen)
+swingLow = ta.pivotlow(low, swingLen, swingLen)
+
+var float sh1 = na, var float sh2 = na, var float sh3 = na
+var float sl1 = na, var float sl2 = na, var float sl3 = na
+var int sh1Bar = na, var int sl1Bar = na
+
+if not na(swingHigh)
+    sh3 := sh2, sh2 := sh1, sh1 := swingHigh
+    sh1Bar := bar_index - swingLen
+
+if not na(swingLow)
+    sl3 := sl2, sl2 := sl1, sl1 := swingLow
+    sl1Bar := bar_index - swingLen
+
+bullishStructure = not na(sh1) and not na(sh2) and not na(sl1) and not na(sl2) and sh1 > sh2 and sl1 > sl2
+bearishStructure = not na(sh1) and not na(sh2) and not na(sl1) and not na(sl2) and sh1 < sh2 and sl1 < sl2
+
+structureFlipBull = bullishStructure and not bullishStructure[1]
+structureFlipBear = bearishStructure and not bearishStructure[1]
+
+outerHigh = ta.highest(high, structureLookback)
+outerLow = ta.lowest(low, structureLookback)
+outerMid = (outerHigh + outerLow) / 2
+
+// ==================== SUPPORT & RESISTANCE ====================
+
+atrValue = ta.atr(14)
+
+resistanceLevel = not na(sh1) ? sh1 : outerHigh
+supportLevel = not na(sl1) ? sl1 : outerLow
+
+zoneSize = atrValue * 0.5
+
+nearResistance = math.abs(close - resistanceLevel) < zoneSize
+nearSupport = math.abs(close - supportLevel) < zoneSize
+atResistance = high >= resistanceLevel - zoneSize * 0.3 and high <= resistanceLevel + zoneSize
+atSupport = low <= supportLevel + zoneSize * 0.3 and low >= supportLevel - zoneSize
+
+// ==================== CANDLESTICK PATTERNS ====================
+
+upperWick = high - math.max(close, open)
+lowerWick = math.min(close, open) - low
+isBullish = close > open
+isBearish = close < open
+
+bullishEngulfing = isBullish and close[1] < open[1] and open <= close[1] and close >= open[1] and bodySize > bodySize[1] * 1.2
+bullishPinBar = lowerWick > bodySize * 2.5 and upperWick < bodySize * 0.3 and range_ > avgRange * 0.6 and isBullish
+isInsideBar = high < high[1] and low > low[1]
+
+bearishEngulfing = isBearish and close[1] > open[1] and open >= close[1] and close <= open[1] and bodySize > bodySize[1] * 1.2
+bearishPinBar = upperWick > bodySize * 2.5 and lowerWick < bodySize * 0.3 and range_ > avgRange * 0.6 and isBearish
+
+multiTouchSupport = ta.crossover(low, supportLevel + zoneSize) and ta.crossover(low[1], supportLevel + zoneSize)
+multiTouchResistance = ta.crossunder(high, resistanceLevel - zoneSize) and ta.crossunder(high[1], resistanceLevel - zoneSize)
+
+// ==================== 90% RULE ====================
+
+var float correctionStart = na
+var float impulseTarget = na
+
+if phaseChangeImpulseToCorrective
+    correctionStart := close
+    impulseTarget := na
+
+ninetyPercentLevel = not na(correctionStart) ? correctionStart : na
+
+// ==================== PATTERNS WITHIN PATTERNS ====================
+
+flagUp = inCorrectivePhase and bullishStructure and range_ < avgRange * 0.5 and consecutiveDown <= 3 and close > open[swingLen]
+flagDown = inCorrectivePhase and bearishStructure and range_ < avgRange * 0.5 and consecutiveUp <= 3 and close < open[swingLen]
+
+patternWithinPatternBull = nearSupport and inCorrectivePhase and (bullishEngulfing or bullishPinBar or isInsideBar)
+patternWithinPatternBear = nearResistance inCorrectivePhase and (bearishEngulfing or bearishPinBar or isInsideBar)
+
+// ==================== ENTRY TYPES ====================
+
+riskEntryLong = nearSupport and bullishStructure and (bullishEngulfing or bullishPinBar) and inCorrectivePhase and not inImpulsivePhase
+riskEntryShort = nearResistance and bearishStructure and (bearishEngulfing or bearishPinBar) and inCorrectivePhase and not inImpulsivePhase
+
+reducedRiskEntryLong = bullishStructure and close > sh1 and close[1] <= sh1 and inCorrectivePhase[1]
+reducedRiskEntryShort = bearishStructure and close < sl1 and close[1] >= sl1 and inCorrectivePhase[1]
+
+longEntry = (useRiskEntry and riskEntryLong) or (useReducedRiskEntry and reducedRiskEntryLong)
+shortEntry = (useRiskEntry and riskEntryShort) or (useReducedRiskEntry and reducedRiskEntryShort)
+
+finalLong = longEntry and inSession and canTrade
+finalShort = shortEntry and inSession and canTrade
+
+// ==================== POSITION SIZING ====================
+
+longStop = not na(sl1) ? sl1 - atrValue * slBufferATR : close - atrValue * slBufferATR
+shortStop = not na(sh1) ? sh1 + atrValue * slBufferATR : close + atrValue * slBufferATR
+
+longRisk = math.abs(close - longStop)
+shortRisk = math.abs(shortStop - close)
+longTP = close + longRisk * tpRatio
+shortTP = close - shortRisk * tpRatio
+
+riskAmount = strategy.equity * (riskPercent / 100)
+longQty = longRisk > 0 ? riskAmount / longRisk : 0
+shortQty = shortRisk > 0 ? riskAmount / shortRisk : 0
+
+// ==================== STRATEGY EXECUTION ====================
+
+if finalLong and strategy.position_size == 0
+    entryType = riskEntryLong ? "RISK LONG" : "REDUCED LONG"
+    strategy.entry("Long", strategy.long, qty=longQty, comment=entryType)
+    strategy.exit("Long Exit", "Long", stop=longStop, limit=longTP, comment_profit="90% Rule / TP", comment_loss="SL Hit")
+    tradesToday += 1
+
+if finalShort and strategy.position_size == 0
+    entryType = riskEntryShort ? "RISK SHORT" : "REDUCED SHORT"
+    strategy.entry("Short", strategy.short, qty=shortQty, comment=entryType)
+    strategy.exit("Short Exit", "Short", stop=shortStop, limit=shortTP, comment_profit="90% Rule / TP", comment_loss="SL Hit")
+    tradesToday += 1
+
+// ==================== BREAK-EVEN METHOD ====================
+
+if strategy.position_size > 0
+    entryPrice = strategy.opentrades.entry_price(0)
+    currRisk = entryPrice - longStop
+    moveAmt = close - entryPrice
+    if moveAmt >= entryPrice * 0.01 or (breakevenTrigger == "1% move or recentHL" and moveAmt >= currRisk * 1.0)
+        strategy.exit("Long BE", "Long", stop=entryPrice + syminfo.mintick * 2, limit=longTP)
+    if useNinetyPercentRule and not na(correctionStart)
+        distTo90 = math.abs(close - correctionStart)
+        if distTo90 < atrValue * 0.5 and isCorrective
+            strategy.exit("Long 90%", "Long", stop=close + syminfo.mintick * 2, limit=longTP)
+
+if strategy.position_size < 0
+    entryPrice = strategy.opentrades.entry_price(0)
+    currRisk = shortStop - entryPrice
+    moveAmt = entryPrice - close
+    if moveAmt >= entryPrice * 0.01 or (breakevenTrigger == "1% move or recentHL" and moveAmt >= currRisk * 1.0)
+        strategy.exit("Short BE", "Short", stop=entryPrice - syminfo.mintick * 2, limit=shortTP)
+    if useNinetyPercentRule and not na(correctionStart)
+        distTo90 = math.abs(close - correctionStart)
+        if distTo90 < atrValue * 0.5 and isCorrective
+            strategy.exit("Short 90%", "Short", stop=close - syminfo.mintick * 2, limit=shortTP)
+
+// ==================== HALF-RISK METHOD ====================
+
+if useHalfRiskMethod and strategy.position_size > 0
+    entryPrice = strategy.opentrades.entry_price(0)
+    barsInTrade = ta.barssince(strategy.position_size != strategy.position_size[1]) > 0 ? ta.barssince(strategy.position_size != strategy.position_size[1]) : 1
+    halfRiskSL = entryPrice + (entryPrice - longStop) * 0.5
+    if inCorrectivePhase and barsInTrade >= halfRiskThreshold and close < entryPrice + (entryPrice - longStop) * 0.5
+        strategy.exit("Long HalfRisk", "Long", stop=halfRiskSL, limit=longTP)
+
+if useHalfRiskMethod and strategy.position_size < 0
+    entryPrice = strategy.opentrades.entry_price(0)
+    barsInTrade = ta.barssince(strategy.position_size != strategy.position_size[1]) > 0 ? ta.barssince(strategy.position_size != strategy.position_size[1]) : 1
+    halfRiskSL = entryPrice - (shortStop - entryPrice) * 0.5
+    if inCorrectivePhase and barsInTrade >= halfRiskThreshold and close > entryPrice - (shortStop - entryPrice) * 0.5
+        strategy.exit("Short HalfRisk", "Short", stop=halfRiskSL, limit=shortTP)
+
+// ==================== SCALING IN ====================
+
+var int scaleInCount = 0
+
+if enableScalingIn and strategy.position_size > 0 and scaleInCount < maxScaleIns
+    entryPrice = strategy.opentrades.entry_price(0)
+    isAtBE = close > entryPrice + syminfo.mintick * 2
+    if isAtBE and inCorrectivePhase and phaseChangeCorrectiveToImpulse
+        strategy.entry("ScaleIn_L", strategy.long, qty=longQty * 0.5, comment="SCALE-IN")
+        scaleInCount += 1
+
+if enableScalingIn and strategy.position_size < 0 and scaleInCount < maxScaleIns
+    entryPrice = strategy.opentrades.entry_price(0)
+    isAtBE = close < entryPrice - syminfo.mintick * 2
+    if isAtBE and inCorrectivePhase and phaseChangeCorrectiveToImpulse
+        strategy.entry("ScaleIn_S", strategy.short, qty=shortQty * 0.5, comment="SCALE-IN")
+        scaleInCount += 1
+
+if strategy.position_size == 0
+    scaleInCount := 0
+
+// ==================== VISUALS ====================
+
+plot(showStructure ? resistanceLevel : na, "Resistance", color=color.new(color.red, 60), linewidth=2, style=plot.style_stepline)
+plot(showStructure ? supportLevel : na, "Support", color=color.new(color.green, 60), linewidth=2, style=plot.style_stepline)
+plot(show90Percent and useNinetyPercentRule ? ninetyPercentLevel : na, "90% Rule", color=color.new(color.orange, 50), linewidth=1, style=plot.style_linebr)
+
+bgcolor(bullishStructure ? color.new(color.green, 95) : bearishStructure ? color.new(color.red, 95) : na, title="Structure Background")
+bgcolor(showPhases and inImpulsivePhase ? color.new(color.blue, 95) : showPhases and inCorrectivePhase ? color.new(color.yellow, 95) : na, title="Nature Phase")
+
+plotshape(showEntries and finalLong and riskEntryLong, "Risk Long", shape.triangleup, location.belowbar, color.new(color.lime, 0), size=size.normal, text="RISK\nLONG", textcolor=color.lime)
+plotshape(showEntries and finalLong and not riskEntryLong, "Reduced Long", shape.triangleup, location.belowbar, color.new(color.green, 0), size=size.normal, text="REDUCED\nLONG", textcolor=color.green)
+plotshape(showEntries and finalShort and riskEntryShort, "Risk Short", shape.triangledown, location.abovebar, color.new(color.fuchsia, 0), size=size.normal, text="RISK\nSHORT", textcolor=color.fuchsia)
+plotshape(showEntries and finalShort and not riskEntryShort, "Reduced Short", shape.triangledown, location.abovebar, color.new(color.red, 0), size=size.normal, text="REDUCED\nSHORT", textcolor=color.red)
+
+plotshape(not na(swingHigh), "Swing High", shape.xcross, location.abovebar, color.new(color.red, 50), size=size.tiny, offset=-swingLen)
+plotshape(not na(swingLow), "Swing Low", shape.xcross, location.belowbar, color.new(color.green, 50), size=size.tiny, offset=-swingLen)
+
+// ==================== INFO TABLE ====================
+
+var table infoTable = table.new(position.top_right, 2, 10, bgcolor=color.new(color.black, 80), border_width=1)
+
+if barstate.islast
+    table.cell(infoTable, 0, 0, "FalconFX Bot", text_color=color.white, text_size=size.normal)
+    table.cell(infoTable, 1, 0, "v3.2 Clean", text_color=color.gray, text_size=size.small)
+    table.cell(infoTable, 0, 1, "Structure:", text_color=color.gray, text_size=size.small)
+    table.cell(infoTable, 1, 1, bullishStructure ? "HH+HL" : bearishStructure ? "LH+LL" : "EVOLVING", text_color=bullishStructure ? color.green : bearishStructure ? color.red : color.orange, text_size=size.small)
+    table.cell(infoTable, 0, 2, "Nature:", text_color=color.gray, text_size=size.small)
+    table.cell(infoTable, 1, 2, inImpulsivePhase ? "IMPULSIVE" : inCorrectivePhase ? "CORRECTIVE" : "TRANSITION", text_color=inImpulsivePhase ? color.blue : inCorrectivePhase ? color.yellow : color.gray, text_size=size.small)
+    table.cell(infoTable, 0, 3, "Trades Today:", text_color=color.gray, text_size=size.small)
+    table.cell(infoTable, 1, 3, str.tostring(tradesToday) + "/" + str.tostring(maxTradesDay), text_color=tradesToday >= maxTradesDay ? color.red : color.green, text_size=size.small)
+    table.cell(infoTable, 0, 4, "Session:", text_color=color.gray, text_size=size.small)
+    table.cell(infoTable, 1, 4, inSession ? "ACTIVE" : "WAIT", text_color=inSession ? color.green : color.red, text_size=size.small)
+    table.cell(infoTable, 0, 5, "Near Res:", text_color=color.gray, text_size=size.small)
+    table.cell(infoTable, 1, 5, nearResistance ? "YES" : "no", text_color=nearResistance ? color.orange : color.gray, text_size=size.small)
+    table.cell(infoTable, 0, 6, "Near Sup:", text_color=color.gray, text_size=size.small)
+    table.cell(infoTable, 1, 6, nearSupport ? "YES" : "no", text_color=nearSupport ? color.orange : color.gray, text_size=size.small)
+    table.cell(infoTable, 0, 7, "90% Level:", text_color=color.gray, text_size=size.small)
+    table.cell(infoTable, 1, 7, useNinetyPercentRule ? "ACTIVE" : "OFF", text_color=useNinetyPercentRule ? color.orange : color.gray, text_size=size.small)
+    table.cell(infoTable, 0, 8, "Scaling:", text_color=color.gray, text_size=size.small)
+    table.cell(infoTable, 1, 8, enableScalingIn ? str.tostring(scaleInCount) + "/" + str.tostring(maxScaleIns) : "OFF", text_color=enableScalingIn ? color.blue : color.gray, text_size=size.small)
+    table.cell(infoTable, 0, 9, "ATR:", text_color=color.gray, text_size=size.small)
+    table.cell(infoTable, 1, 9, str.tostring(atrValue, "#.####"), text_color=color.white, text_size=size.small)
+
+// ==================== ALERTS ====================
+
+alertcondition(finalLong, title="FalconFX Long Entry", message="FalconFX: LONG ENTRY on {{ticker}} at {{close}}")
+alertcondition(finalShort, title="FalconFX Short Entry", message="FalconFX: SHORT ENTRY on {{ticker}} at {{close}}")
+alertcondition(structureFlipBull, title="Structure Flip Bullish", message="FalconFX: {{ticker}} structure turned BULLISH (HH+HL)")
+alertcondition(structureFlipBear, title="Structure Flip Bearish", message="FalconFX: {{ticker}} structure turned BEARISH (LH+LL)")
+alertcondition(inImpulsivePhase and not inImpulsivePhase[1], title="Impulsive Phase Started", message="FalconFX: {{ticker}} impulsive move beginning")
+alertcondition(inCorrectivePhase and not inCorrectivePhase[1], title="Corrective Phase Started", message="FalconFX: {{ticker}} corrective phase beginning")
