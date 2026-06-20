@@ -1,0 +1,244 @@
+// This Pine Script™ is subject to the terms of the Mozilla Public License 2.0
+// https://mozilla.org/MPL/2.0/
+
+//@version=6
+strategy("FalconFX_Bot_v6", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100, initial_capital=10000, commission_type=strategy.commission.percent, commission_value=0.02, slippage=2)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// FALCONFX BOT v6 — FTMO-COMPLIANT
+// Nature Theory → Market Structure → Patterns → Trade Management
+// Pine Script v6 | TradingView Strategy Tester
+// ══════════════════════════════════════════════════════════════════════════════
+
+// ─── INPUTS ──────────────────────────────────────────────────────────────────
+
+grpRisk     = "═══ Risk Management (FTMO) ═══"
+riskPct     = input.float(1.0, "Risk % per Trade", minval=0.1, maxval=3.0, step=0.1, group=grpRisk)
+maxDailyLoss= input.float(5.0, "Max Daily Loss % (FTMO)", minval=1.0, maxval=10.0, step=0.5, group=grpRisk)
+maxTotalDD  = input.float(8.0, "Max Total DD % (FTMO)", minval=3.0, maxval=15.0, step=0.5, group=grpRisk)
+maxTradesDay= input.int(4, "Max Trades per Day", minval=1, maxval=10, group=grpRisk)
+consecLossMax= input.int(3, "Max Consecutive Losses", minval=2, maxval=10, group=grpRisk)
+
+grpStrat    = "═══ Strategy Parameters ═══"
+swingLB     = input.int(10, "Swing Lookback", minval=3, maxval=50, group=grpStrat)
+slBuffer    = input.float(1.5, "SL Buffer (× ATR)", minval=0.5, maxval=5.0, step=0.1, group=grpStrat)
+beTrigger   = input.float(1.5, "Break-Even Trigger (R)", minval=0.5, maxval=3.0, step=0.1, group=grpStrat)
+tpRatio     = input.float(3.0, "Take-Profit Ratio (R)", minval=1.0, maxval=10.0, step=0.5, group=grpStrat)
+entryMaxDist= input.float(1.5, "Entry Max Distance (× ATR)", minval=0.3, maxval=3.0, step=0.1, group=grpStrat)
+consolidBars= input.int(5, "Consolidation Bars", minval=3, maxval=20, group=grpStrat)
+atrLen      = input.int(14, "ATR Length", minval=5, maxval=50, group=grpStrat)
+
+grpPat     = "═══ Patterns (FalconFX) ═══"
+useEngulf   = input.bool(true, "Engulfing at Structure", group=grpPat)
+usePin      = input.bool(true, "Pin Bar at Structure", group=grpPat)
+useInside   = input.bool(true, "Inside Bar", group=grpPat)
+useFlag     = input.bool(true, "Flag/Breakout Bar", group=grpPat)
+
+grpMgmt    = "═══ Trade Management ═══"
+useBE       = input.bool(true, "Enable Break-Even Method", group=grpMgmt)
+useScaleIn  = input.bool(false, "Enable Scale-In", group=grpMgmt)
+riskPerScaleIn = input.float(0.5, "Scale-In Risk %", minval=0.1, maxval=1.5, step=0.1, group=grpMgmt)
+maxScaleIns = input.int(2, "Max Scale-Ins", minval=1, maxval=5, group=grpMgmt)
+
+grpVis     = "═══ Visuals ═══"
+showStruct  = input.bool(true, "Show Market Structure", group=grpVis)
+showBE      = input.bool(true, "Show Break-Even Lines", group=grpVis)
+showSignals = input.bool(true, "Show Entry Signals", group=grpVis)
+showDD      = input.bool(true, "Show Drawdown Info", group=grpVis)
+
+// ─── CORE INDICATORS ─────────────────────────────────────────────────────────
+
+atr = ta.atr(atrLen)
+
+// ─── MARKET STRUCTURE (Nature Theory) ───────────────────────────────────────
+
+swingHigh = ta.pivothigh(high, swingLB, swingLB)
+swingLow  = ta.pivotlow(low, swingLB, swingLB)
+
+var float lastHigh = na
+var float lastLow  = na
+var int   trend    = 0  // 1 = bullish, -1 = bearish, 0 = undefined
+
+if not na(swingHigh)
+    lastHigh := swingHigh
+
+if not na(swingLow)
+    lastLow := swingLow
+
+// Trend determination: HH + HL = bullish, LH + LL = bearish
+if not na(swingHigh) and not na(swingLow)
+    if swingHigh > nz(lastHigh[1]) and swingLow > nz(lastLow[1])
+        trend := 1
+    else if swingHigh < nz(lastHigh[1]) and swingLow < nz(lastLow[1])
+        trend := -1
+
+// ─── PATTERNS WITHIN PATTERNS (FalconFX) ────────────────────────────────────
+
+bodySize   = math.abs(close - open)
+upperWick  = high - math.max(open, close)
+lowerWick  = math.min(open, close) - low
+
+// Engulfing
+isBullEngulf = close > open and close[1] < open[1] and close > open[1] and open < close[1]
+isBearEngulf = close < open and close[1] > open[1] and close < open[1] and open > close[1]
+
+// Pin Bar
+isBullPin = lowerWick > bodySize * 2 and upperWick < bodySize * 0.5
+isBearPin = upperWick > bodySize * 2 and lowerWick < bodySize * 0.5
+
+// Inside Bar
+isInsideBar = high < high[1] and low > low[1]
+
+// Flag / Breakout Bar
+isBullFlag = close > open and high == high[1] and low > low[1] and bodySize > atr * 0.3
+isBearFlag = close < open and low == low[1] and high < high[1] and bodySize > atr * 0.3
+
+// Consolidation: tight range
+isConsolid = (high - low) < atr * 0.8
+
+// ─── ENTRY CONDITIONS ───────────────────────────────────────────────────────
+
+barsSinceSwing = ta.barssince(not na(swingHigh) or not na(swingLow))
+nearSwing      = barsSinceSwing <= swingLB * 3
+
+// Distance from structure
+distFromStructure = math.abs(close - (trend == 1 ? lastLow : trend == -1 ? lastHigh : close))
+distOk = distFromStructure <= atr * entryMaxDist
+
+// Pattern confirmation
+bullPattern = (useEngulf and isBullEngulf) or (usePin and isBullPin) or (useInside and isInsideBar) or (useFlag and isBullFlag)
+bearPattern = (useEngulf and isBearEngulf) or (usePin and isBearPin) or (useInside and isInsideBar) or (useFlag and isBearFlag)
+
+// Final entry signals
+longCond  = trend == 1 and nearSwing and distOk and bullPattern
+shortCond = trend == -1 and nearSwing and distOk and bearPattern
+
+// ─── FTMO RISK MANAGEMENT ───────────────────────────────────────────────────
+
+var int   barsToday      = 0
+var int   tradesToday    = 0
+var int   consecLosses   = 0
+var float peakEquity     = strategy.equity
+var float dailyStartEq   = strategy.equity
+var float dailyPnL       = 0.0
+
+barsToday += 1
+if barsToday > 24
+    barsToday   := 1
+    tradesToday := 0
+
+// Track daily PnL
+dailyPnL := strategy.equity - dailyStartEq
+peakEquity := math.max(peakEquity, strategy.equity)
+
+dailyLossLimit = strategy.equity * maxDailyLoss / 100
+totalDDLimit   = peakEquity * maxTotalDD / 100
+
+// FTMO compliance checks
+canTradeDailyLoss = dailyPnL > -dailyLossLimit
+canTradeTotalDD   = strategy.equity > peakEquity - totalDDLimit
+canTradeCount     = tradesToday < maxTradesDay
+canTradeConsec    = consecLosses < consecLossMax
+
+canTrade = canTradeDailyLoss and canTradeTotalDD and canTradeCount and canTradeConsec
+
+// ─── POSITION SIZING ────────────────────────────────────────────────────────
+
+calcQty(slDist) =>
+    riskAmt = strategy.equity * riskPct / 100
+    riskAmt / slDist
+
+// ─── TRADE EXECUTION ────────────────────────────────────────────────────────
+
+var float entryPrice = na
+var float slDist     = na
+var int   scaleCount = 0
+
+if canTrade and longCond and strategy.position_size == 0
+    slDist     := (high - nz(lastLow)) + atr * slBuffer
+    tpDist     = slDist * tpRatio
+    longQty    = calcQty(slDist)
+    entryPrice := close
+    scaleCount := 0
+    strategy.entry("Long", strategy.long, qty=longQty, comment="FalconFX_Long")
+    strategy.exit("Long Exit", "Long", stop=close - slDist, limit=close + tpDist)
+    tradesToday += 1
+
+if canTrade and shortCond and strategy.position_size == 0
+    slDist     := (nz(lastHigh) - low) + atr * slBuffer
+    tpDist     = slDist * tpRatio
+    shortQty   = calcQty(slDist)
+    entryPrice := close
+    scaleCount := 0
+    strategy.entry("Short", strategy.short, qty=shortQty, comment="FalconFX_Short")
+    strategy.exit("Short Exit", "Short", stop=close + slDist, limit=close - tpDist)
+    tradesToday += 1
+
+// ─── BREAK-EVEN METHOD (FalconFX) ──────────────────────────────────────────
+
+if useBE and strategy.position_size > 0
+    currRisk = entryPrice - strategy.opentrades.entry_price(0)
+    if not na(currRisk) and currRisk > 0
+        moveAmt = close - strategy.opentrades.entry_price(0)
+        if moveAmt >= currRisk * beTrigger
+            strategy.exit("BE_L", stop=strategy.opentrades.entry_price(0) + atr * 0.1)
+
+if useBE and strategy.position_size < 0
+    currRisk = strategy.opentrades.entry_price(0) - entryPrice
+    if not na(currRisk) and currRisk > 0
+        moveAmt = strategy.opentrades.entry_price(0) - close
+        if moveAmt >= currRisk * beTrigger
+            strategy.exit("BE_S", stop=strategy.opentrades.entry_price(0) - atr * 0.1)
+
+// ─── SCALE-IN (Optional) ───────────────────────────────────────────────────
+
+if useScaleIn and strategy.position_size > 0 and scaleCount < maxScaleIns
+    if close > entryPrice + slDist * beTrigger and strategy.position_size > 0
+        scaleQty = calcQty(slDist) * riskPerScaleIn
+        strategy.entry("ScaleIn_L", strategy.long, qty=scaleQty, comment="SCALE_IN")
+        scaleCount += 1
+
+if useScaleIn and strategy.position_size < 0 and scaleCount < maxScaleIns
+    if close < entryPrice - slDist * beTrigger and strategy.position_size < 0
+        scaleQty = calcQty(slDist) * riskPerScaleIn
+        strategy.entry("ScaleIn_S", strategy.short, qty=scaleQty, comment="SCALE_IN")
+        scaleCount += 1
+
+// ─── TRACK CONSECUTIVE LOSSES ───────────────────────────────────────────────
+
+if strategy.closedtrades > 0
+    lastTradeProfit = strategy.closedtrades.profit(strategy.closedtrades - 1)
+    if barstate.isconfirmed and lastTradeProfit < 0
+        consecLosses += 1
+    else if barstate.isconfirmed and lastTradeProfit > 0
+        consecLosses := 0
+
+// ─── VISUALS ────────────────────────────────────────────────────────────────
+
+plotshape(showSignals and longCond, "Long Signal", shape.triangleup, location.belowbar, color=color.new(color.green, 0), size=size.small)
+plotshape(showSignals and shortCond, "Short Signal", shape.triangledown, location.abovebar, color=color.new(color.red, 0), size=size.small)
+
+// Structure lines
+plot(showStruct ? lastHigh : na, "Swing High", color=color.new(color.red, 50), linewidth=1, style=plot.style_circles)
+plot(showStruct ? lastLow : na, "Swing Low", color=color.new(color.green, 50), linewidth=1, style=plot.style_circles)
+
+// Break-even line
+plot(showBE and strategy.position_size != 0 ? entryPrice : na, "Break-Even", color=color.new(color.yellow, 0), linewidth=1, style=plot.style_linebr)
+
+// Drawdown table
+if showDD
+    var table ddTable = table.new(position.top_right, 2, 4, bgcolor=color.new(color.black, 80), border_width=1)
+    if barstate.islast
+        currDD = ((peakEquity - strategy.equity) / peakEquity) * 100
+        table.cell(ddTable, 0, 0, "Peak Equity", text_color=color.white, text_size=size.small)
+        table.cell(ddTable, 1, 0, str.tostring(peakEquity, "#.##"), text_color=color.green, text_size=size.small)
+        table.cell(ddTable, 0, 1, "Current Equity", text_color=color.white, text_size=size.small)
+        table.cell(ddTable, 1, 1, str.tostring(strategy.equity, "#.##"), text_color=color.white, text_size=size.small)
+        table.cell(ddTable, 0, 2, "Drawdown %", text_color=color.white, text_size=size.small)
+        table.cell(ddTable, 1, 2, str.tostring(currDD, "#.##") + "%", text_color=(currDD > maxTotalDD ? color.red : color.yellow), text_size=size.small)
+        table.cell(ddTable, 0, 3, "Daily PnL", text_color=color.white, text_size=size.small)
+        table.cell(ddTable, 1, 3, str.tostring(dailyPnL, "#.##"), text_color=(dailyPnL < 0 ? color.red : color.green), text_size=size.small)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// END OF FALCONFX BOT v6
+// ══════════════════════════════════════════════════════════════════════════════
