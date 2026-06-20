@@ -52,21 +52,13 @@ show90Percent = input.bool(true, "Show 90% Rule Level")
 
 // ==================== SESSION FILTER ====================
 
-currentHour = hour
-inLondonSession = currentHour >= londonStart and currentHour < londonEnd
-inNYSession = currentHour >= nyStart and currentHour < nyEnd
-inSession = not useSessionFilter or inLondonSession or inNYSession
+inSession = not useSessionFilter
 
 // ==================== DAILY TRADE COUNTER ====================
 
 var int tradesToday = 0
-var int lastTradeDay = 0
-isNewDay = ta.change(dayofmonth) != 0
-
-if isNewDay
+if ta.change(time) != time[1]
     tradesToday := 0
-    lastTradeDay := dayofmonth
-
 canTrade = tradesToday < maxTradesDay
 
 // ==================== NATURE THEORY: IMPULSIVE vs CORRECTIVE ====================
