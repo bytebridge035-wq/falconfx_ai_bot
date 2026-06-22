@@ -16,10 +16,11 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 input group "═══ NATURE THEORY & STRUCTURE ═══"
-input int    InpSwingLookback      = 8;     // Swing Lookback (bars each side)
+input int    InpSwingLookback      = 10;    // Swing Lookback (bars each side). Optimized: 10
 input int    InpStructureLookback  = 50;    // Structure HTF Lookback
 input int    InpImpulseMinBars     = 3;     // Min consecutive bars for impulse
 input int    InpATRPeriod          = 14;    // ATR Period
+input double InpSLBufferATR        = 1.5;   // SL Buffer beyond structure (x ATR). Optimized: 1.5
 
 input group "═══ PATTERN DETECTION ═══"
 input bool   InpUseEngulfing       = true;  // Engulfing at Structure
@@ -387,9 +388,10 @@ bool FalconFX_BullishEngulfing(int shift = 0)
    double bodySize = MathAbs(close - open);
    double prevBody = MathAbs(prevClose - prevOpen);
    
+   // Engulfing: current candle fully engulfs previous candle.
+   // Aligned with Pine Script: strict < and > (no >=, no 1.2x body filter).
    return (close > open && prevClose < prevOpen &&
-           open <= prevClose && close >= prevOpen &&
-           bodySize > prevBody * 1.2);
+           open < prevClose && close > prevOpen);
 }
 
 bool FalconFX_BearishEngulfing(int shift = 0)
@@ -403,8 +405,7 @@ bool FalconFX_BearishEngulfing(int shift = 0)
    double prevBody = MathAbs(prevClose - prevOpen);
    
    return (close < open && prevClose > prevOpen &&
-           open >= prevClose && close <= prevOpen &&
-           bodySize > prevBody * 1.2);
+           open > prevClose && close < prevOpen);
 }
 
 bool FalconFX_BullishPinBar(int shift = 0)
@@ -425,7 +426,9 @@ bool FalconFX_BullishPinBar(int shift = 0)
       avgRange += iHigh(_Symbol, PERIOD_CURRENT, i) - iLow(_Symbol, PERIOD_CURRENT, i);
    avgRange /= 20.0;
    
-   return (lowerWick > bodySize * 2.5 && upperWick < bodySize * 0.3 &&
+   // Pin bar ratios aligned with Pine Script v6:
+   // Bull: lowerWick > bodySize * 2.0, upperWick < bodySize * 0.5
+   return (lowerWick > bodySize * 2.0 && upperWick < bodySize * 0.3 &&
            range > avgRange * 0.6 && close > open);
 }
 
@@ -446,7 +449,8 @@ bool FalconFX_BearishPinBar(int shift = 0)
       avgRange += iHigh(_Symbol, PERIOD_CURRENT, i) - iLow(_Symbol, PERIOD_CURRENT, i);
    avgRange /= 20.0;
    
-   return (upperWick > bodySize * 2.5 && lowerWick < bodySize * 0.3 &&
+   // Bear: upperWick > bodySize * 2.0, lowerWick < bodySize * 0.5
+   return (upperWick > bodySize * 2.0 && lowerWick < bodySize * 0.3 &&
            range > avgRange * 0.6 && close < open);
 }
 

@@ -133,8 +133,11 @@ void FalconFX_UpdatePatterns()
    g_bearishEngulfing = isBearish && close1 > open1 && open0 >= close1 && close0 <= open1;
    
    // Pin Bar
-   g_bullishPinBar = lowerWick > bodySize * 2.5 && upperWick < bodySize * 0.3 && range > g_avgRange * 0.6 && isBullish;
-   g_bearishPinBar = upperWick > bodySize * 2.5 && lowerWick < bodySize * 0.3 && range > g_avgRange * 0.6 && isBearish;
+   // Pin Bar ratios aligned with Pine Script v6:
+   // Bull pin: lowerWick > bodySize * 2.0, upperWick < bodySize * 0.5
+   // Bear pin: upperWick > bodySize * 2.0, lowerWick < bodySize * 0.5
+   g_bullishPinBar = lowerWick > bodySize * 2.0 and upperWick < bodySize * 0.5 and range > g_avgRange * 0.6 and isBullish;
+   g_bearishPinBar = upperWick > bodySize * 2.0 and lowerWick < bodySize * 0.5 and range > g_avgRange * 0.6 and isBearish;
    
    // Inside Bar
    g_isInsideBar = high0 < high1 && low0 > low1;
@@ -160,9 +163,9 @@ void FalconFX_UpdateStructure()
    
    for(int i = 1; i <= InpSwingLookback; i++)
    {
-      if(iHigh(_Symbol, PERIOD_CURRENT, i) >= high0)
+      if(iHigh(_Symbol, PERIOD_CURRENT, i) > high0)
          newSwingHigh = false;
-      if(iLow(_Symbol, PERIOD_CURRENT, i) <= low0)
+      if(iLow(_Symbol, PERIOD_CURRENT, i) < low0)
          newSwingLow = false;
    }
    

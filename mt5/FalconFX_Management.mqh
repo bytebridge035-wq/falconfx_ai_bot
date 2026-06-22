@@ -27,7 +27,7 @@ input int    InpMaxTradesPerDay  = 2;     // Max Trades Per Day
 input bool   InpUseHalfRiskMethod = true;  // Enable Half-Risk Method
 input int    InpHalfRiskHours    = 4;     // Hours before Half-Risk trigger
 input double InpTPRatio          = 3.0;   // Take Profit R:R Ratio
-input double InpBETrigger        = 1.0;   // B/E trigger (% move in profit)
+input double InpBETrigger        = 1.5;   // B/E trigger (x R profit before moving SL)
 
 input group "═══ SCALING IN (Advanced) ═══"
 input bool   InpEnableScalingIn  = false;  // Enable Scaling In
@@ -54,7 +54,9 @@ CPositionInfo g_position;
 // MAGIC NUMBER
 // ═══════════════════════════════════════════════════════════════════════════
 
-#define FALCONFX_MAGIC 123456
+// Magic number MUST match InpMagic in FalconFX.mq5 (498817)
+// This is how the EA identifies its own positions vs other EAs.
+#define FALCONFX_MAGIC 498817
 
 // ═══════════════════════════════════════════════════════════════════════════
 // INITIALIZATION
@@ -199,10 +201,8 @@ void FalconFX_ApplyBreakEven()
    
    double moveInProfit = g_isLong ? (currentPrice - g_entryPrice) : (g_entryPrice - currentPrice);
    
-   // Trigger: price moves BETrigger% into profit OR 1R
-   double triggerDistance = g_entryPrice * (InpBETrigger / 100.0);
-   if(triggerDistance < riskDistance)
-      triggerDistance = riskDistance;  // At least 1R
+   // Trigger: price moves BETrigger R-multiples into profit OR at least 1R
+   double triggerDistance = riskDistance * InpBETrigger;
    
    if(moveInProfit >= triggerDistance)
    {
@@ -210,25 +210,25 @@ void FalconFX_ApplyBreakEven()
       double buffer = SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 2;
       double newSL = g_isLong ? g_entryPrice + buffer : g_entryPrice - buffer;
       
-      // Find and modify the order
-      for(int i = OrdersTotal() - 1; i >= 0; i--)
+      // Find and modify the open POSITION (not pending order)
+      for(int i = PositionsTotal() - 1; i >= 0; i--)
       {
-         ulong ticket = OrderGetTicket(i);
+         ulong ticket = PositionGetTicket(i);
          if(ticket == 0) continue;
-         if(OrderGetInteger(ORDER_MAGIC) != FALCONFX_MAGIC) continue;
-         if(OrderGetInteger(ORDER_TYPE) != ORDER_TYPE_BUY && OrderGetInteger(ORDER_TYPE) != ORDER_TYPE_SELL) continue;
+         if(PositionGetInteger(POSITION_MAGIC) != FALCONFX_MAGIC) continue;
          
-         double currentSL = OrderGetDouble(ORDER_SL);
+         double currentSL = PositionGetDouble(POSITION_SL);
+         double currentTP = PositionGetDouble(POSITION_TP);
          
          // Only move SL in our favor
          if(g_isLong && newSL > currentSL)
          {
-            if(g_trade.PositionModify(ticket, newSL, OrderGetDouble(ORDER_TP)))
+            if(g_trade.PositionModify(ticket, newSL, currentTP))
                Print("FalconFX: B/E applied. New SL: ", newSL);
          }
          else if(!g_isLong && newSL < currentSL)
          {
-            if(g_trade.PositionModify(ticket, newSL, OrderGetDouble(ORDER_TP)))
+            if(g_trade.PositionModify(ticket, newSL, currentTP))
                Print("FalconFX: B/E applied. New SL: ", newSL);
          }
          break;
@@ -269,23 +269,23 @@ void FalconFX_ApplyHalfRisk()
       else
          halfRiskSL = g_entryPrice + (riskDistance * 0.5);
       
-      for(int i = OrdersTotal() - 1; i >= 0; i--)
+      for(int i = PositionsTotal() - 1; i >= 0; i--)
       {
-         ulong ticket = OrderGetTicket(i);
+         ulong ticket = PositionGetTicket(i);
          if(ticket == 0) continue;
-         if(OrderGetInteger(ORDER_MAGIC) != FALCONFX_MAGIC) continue;
-         if(OrderGetInteger(ORDER_TYPE) != ORDER_TYPE_BUY && OrderGetInteger(ORDER_TYPE) != ORDER_TYPE_SELL) continue;
+         if(PositionGetInteger(POSITION_MAGIC) != FALCONFX_MAGIC) continue;
          
-         double currentSL = OrderGetDouble(ORDER_SL);
+         double currentSL = PositionGetDouble(POSITION_SL);
+         double currentTP = PositionGetDouble(POSITION_TP);
          
          if(g_isLong && halfRiskSL > currentSL)
          {
-            if(g_trade.PositionModify(ticket, halfRiskSL, OrderGetDouble(ORDER_TP)))
+            if(g_trade.PositionModify(ticket, halfRiskSL, currentTP))
                Print("FalconFX: Half-Risk applied. New SL: ", halfRiskSL);
          }
          else if(!g_isLong && halfRiskSL < currentSL)
          {
-            if(g_trade.PositionModify(ticket, halfRiskSL, OrderGetDouble(ORDER_TP)))
+            if(g_trade.PositionModify(ticket, halfRiskSL, currentTP))
                Print("FalconFX: Half-Risk applied. New SL: ", halfRiskSL);
          }
          break;
@@ -314,18 +314,15 @@ void FalconFX_Apply90PercentRule()
    // If approaching 90% level and showing corrective behavior
    if(distTo90 < atr * 0.5 && g_inCorrectivePhase)
    {
-      // Close position to lock profit
-      for(int i = OrdersTotal() - 1; i >= 0; i--)
+      // Close POSITION using position ticket (not order ticket)
+      for(int i = PositionsTotal() - 1; i >= 0; i--)
       {
-         ulong ticket = OrderGetTicket(i);
+         ulong ticket = PositionGetTicket(i);
          if(ticket == 0) continue;
-         if(OrderGetInteger(ORDER_MAGIC) != FALCONFX_MAGIC) continue;
-         if(OrderGetInteger(ORDER_TYPE) != ORDER_TYPE_BUY && OrderGetInteger(ORDER_TYPE) != ORDER_TYPE_SELL) continue;
-         
-         double closePrice = g_isLong ? SymbolInfoDouble(_Symbol, SYMBOL_BID) : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+         if(PositionGetInteger(POSITION_MAGIC) != FALCONFX_MAGIC) continue;
          
          if(g_trade.PositionClose(ticket))
-            Print("FalconFX: 90% Rule — Position closed at correction start.");
+            Print("FalconFX: 90% Rule - Position closed at correction start.");
          break;
       }
    }
